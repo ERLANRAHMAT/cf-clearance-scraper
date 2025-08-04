@@ -5,13 +5,14 @@ const bodyParser = require('body-parser')
 const authToken = process.env.authToken || null
 const cors = require('cors')
 const reqValidate = require('./module/reqValidate')
-const pidusage = require('pidusage')  // <=== Tambahkan ini
+const pidusage = require('pidusage')  // Monitor CPU usage
 
 // ==== Konfigurasi VPS & Slot ====
 const vCPU = 8                     // VPS kamu 8 vCPU
 const slotPerRequest = 2           // 1 request dianggap makan 2 slot
 const cpuThreshold = 0.85          // Maks CPU usage (85% dari total)
 
+// ==== Queue ====
 let requestQueue = []
 let processingQueue = false
 
@@ -35,10 +36,21 @@ const solveTurnstileMax = require('./endpoints/solveTurnstile.max')
 const wafSession = require('./endpoints/wafSession')
 
 // ==== Cek CPU Usage Real-time ====
-async function canProcessNow() {
+async function getCpuStats() {
     const stats = await pidusage(process.pid)
-    const cpuUsageFraction = stats.cpu / (100 * vCPU) // cpu% / (100*vCPU)
-    return cpuUsageFraction < cpuThreshold
+    const cpuFraction = stats.cpu / (100 * vCPU) // 0..1
+    const memoryGB = stats.memory / (1024 ** 3)
+    return {
+        cpuFraction,
+        cpuPercent: stats.cpu,
+        cpuAvailable: Math.max(0, 1 - cpuFraction),
+        memoryGB: Number(memoryGB.toFixed(2))
+    }
+}
+
+async function canProcessNow() {
+    const { cpuFraction } = await getCpuStats()
+    return cpuFraction < cpuThreshold
 }
 
 // ==== Fungsi Proses Request ====
@@ -66,17 +78,40 @@ async function processRequest(data) {
     }
 }
 
-// ==== Retry Otomatis ====
+// ==== Retry Otomatis + Debug Response ====
 async function retryUntilSuccessOrGiveUp(data, maxRetry = 5, delay = 2000) {
+    let cpuStats = await getCpuStats()
     for (let i = 0; i < maxRetry; i++) {
         const result = await processRequest(data)
+        cpuStats = await getCpuStats()
         if (result.code !== 500) {
-            return { success: true, ...result }
+            return {
+                success: true,
+                ...result,
+                queueLength: requestQueue.length,
+                cpu: {
+                    percent: cpuStats.cpuPercent,
+                    available: cpuStats.cpuAvailable,
+                    memoryGB: cpuStats.memoryGB
+                }
+            }
         }
         console.log(`Retry #${i + 1} for mode ${data.mode}`)
         await new Promise(resolve => setTimeout(resolve, delay))
     }
-    return { success: false, code: 200, message: `Failed after ${maxRetry} retries` }
+
+    // Jika gagal semua
+    return {
+        success: false,
+        code: 200,
+        message: `Failed after ${maxRetry} retries`,
+        queueLength: requestQueue.length,
+        cpu: {
+            percent: cpuStats.cpuPercent,
+            available: cpuStats.cpuAvailable,
+            memoryGB: cpuStats.memoryGB
+        }
+    }
 }
 
 // ==== Endpoint utama ====
