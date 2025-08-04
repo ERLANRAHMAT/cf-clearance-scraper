@@ -36,6 +36,7 @@
     "express": "^4.21.0",
     "jest": "^29.7.0",
     "puppeteer-real-browser": "^1.4.0",
-    "supertest": "^7.0.0"
+    "supertest": "^7.0.0",
+    "pidusage": "^3.0.2"
   }
 }
