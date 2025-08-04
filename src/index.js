@@ -9,12 +9,12 @@ const pidusage = require('pidusage')  // Monitor CPU usage
 
 // ==== Konfigurasi VPS & Slot ====
 const vCPU = 8                     // VPS kamu 8 vCPU
-const slotPerRequest = 2           // 1 request dianggap makan 2 slot
 const cpuThreshold = 0.85          // Maks CPU usage (85% dari total)
 
-// ==== Queue ====
+// ==== Queue dan Hasil ====
 let requestQueue = []
 let processingQueue = false
+let resultsStore = {} // Simpan hasil per jobId
 
 app.use(bodyParser.json({}))
 app.use(bodyParser.urlencoded({ extended: true }))
@@ -35,7 +35,7 @@ const solveTurnstileMin = require('./endpoints/solveTurnstile.min')
 const solveTurnstileMax = require('./endpoints/solveTurnstile.max')
 const wafSession = require('./endpoints/wafSession')
 
-// ==== Cek CPU Usage Real-time ====
+// ==== CPU Monitoring ====
 async function getCpuStats() {
     const stats = await pidusage(process.pid)
     const cpuFraction = stats.cpu / (100 * vCPU) // 0..1
@@ -78,7 +78,7 @@ async function processRequest(data) {
     }
 }
 
-// ==== Retry Otomatis + Debug Response ====
+// ==== Retry Otomatis ====
 async function retryUntilSuccessOrGiveUp(data, maxRetry = 5, delay = 2000) {
     let cpuStats = await getCpuStats()
     for (let i = 0; i < maxRetry; i++) {
@@ -114,7 +114,7 @@ async function retryUntilSuccessOrGiveUp(data, maxRetry = 5, delay = 2000) {
     }
 }
 
-// ==== Endpoint utama ====
+// ==== Endpoint utama (Fast ACK) ====
 app.post('/cf-clearance-scraper', async (req, res) => {
     const data = req.body
     const check = reqValidate(data)
@@ -125,16 +125,38 @@ app.post('/cf-clearance-scraper', async (req, res) => {
     if (process.env.SKIP_LAUNCH != 'true' && !global.browser) 
         return res.status(503).json({ code: 503, message: 'The scanner is not ready yet.' })
 
-    // Jika CPU belum overload dan queue kosong → proses langsung
-    if (await canProcessNow() && requestQueue.length === 0) {
-        const result = await retryUntilSuccessOrGiveUp(data)
-        return res.status(200).send(result)
-    }
+    const jobId = Date.now() + '-' + Math.random().toString(36).substring(2)
 
-    // Kalau overload → masuk queue
-    requestQueue.push({ data, res })
-    console.log(`Request masuk queue. Queue length: ${requestQueue.length}`)
+    // Fast ACK: masukkan queue, balas cepat agar Cloudflare tidak 502
+    requestQueue.push({ data, jobId })
+    console.log(`Job ${jobId} masuk queue. Queue length: ${requestQueue.length}`)
     processQueue()
+
+    const cpuStats = await getCpuStats()
+    return res.status(200).json({
+        success: false,
+        status: "queued",
+        jobId,
+        queueLength: requestQueue.length,
+        cpu: {
+            percent: cpuStats.cpuPercent,
+            available: cpuStats.cpuAvailable,
+            memoryGB: cpuStats.memoryGB
+        }
+    })
+})
+
+// ==== Endpoint ambil hasil ====
+app.get('/cf-clearance-result/:jobId', async (req, res) => {
+    const { jobId } = req.params
+    if (!resultsStore[jobId]) {
+        return res.status(200).json({
+            success: false,
+            status: "pending",
+            message: "Job is still in queue or processing"
+        })
+    }
+    return res.status(200).json(resultsStore[jobId])
 })
 
 // ==== Worker Queue ====
@@ -148,10 +170,12 @@ async function processQueue() {
             await new Promise(resolve => setTimeout(resolve, 500))
         }
 
-        const { data, res } = requestQueue.shift()
-        console.log(`Proses request dari queue. Sisa queue: ${requestQueue.length}`)
+        const { data, jobId } = requestQueue.shift()
+        console.log(`Proses job ${jobId} dari queue. Sisa queue: ${requestQueue.length}`)
         const result = await retryUntilSuccessOrGiveUp(data)
-        res.status(200).send(result)
+
+        // Simpan hasil di store
+        resultsStore[jobId] = result
     }
 
     processingQueue = false
