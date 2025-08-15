@@ -22,7 +22,7 @@ const solveTurnstileMax = require('./endpoints/solveTurnstile.max')
 const wafSession = require('./endpoints/wafSession')
 
 // ==== Konfigurasi VPS & Slot ====
-const vCPU = 8                     // VPS kamu 8 vCPU
+const vCPU = 4                     // VPS kamu 8 vCPU
 const cpuThreshold = 0.85          // Maks CPU usage (85% dari total)
 
 // ==== Lokasi DB JSON ====
